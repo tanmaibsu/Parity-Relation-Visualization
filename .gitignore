@@ -3,3 +3,4 @@ node_modules/
 # Claude Code local overrides (not shared with the team)
 CLAUDE.local.md
 .claude/settings.local.json
+.vercel

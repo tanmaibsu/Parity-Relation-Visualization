@@ -349,21 +349,54 @@ export default function ParityGridDynamic() {
     })
   );
 
-  // ── new: undo, errors, toasts ──
+  // ── undo / redo ──
   const [gridHistory,  setGridHistory]  = useState([]);
+  const [redoStack,    setRedoStack]    = useState([]);
   const [inputErrors,  setInputErrors]  = useState({ bits: null, parity: null, checksum: null });
   const [toasts,       setToasts]       = useState([]);
   const toastIdRef = useRef(0);
 
-  // Keep an always-fresh undo callback for the keyboard handler
+  // ── dark mode ──
+  const [darkMode, setDarkMode] = useState(() => localStorage.getItem("parity-dark-mode") === "true");
+
+  useEffect(() => {
+    document.documentElement.setAttribute("data-theme", darkMode ? "dark" : "light");
+    localStorage.setItem("parity-dark-mode", darkMode);
+  }, [darkMode]);
+
+  // ── diff tracking ──
+  const [originalBits, setOriginalBits] = useState(() => gridToBits(buildDefaultGrid()));
+
+  // ── collapsible sidebar sections ──
+  const [collapsed, setCollapsed] = useState({
+    analysis: false, inspector: false, thresholds: false, loadInputs: false,
+  });
+  const toggleCollapse = (key) => setCollapsed(c => ({ ...c, [key]: !c[key] }));
+
+  // ── shortcuts help ──
+  const [showShortcuts, setShowShortcuts] = useState(false);
+
+  // ── undo/redo refs ──
   const undoRef = useRef(null);
   undoRef.current = () => {
     if (gridHistory.length === 0) return;
     const prev = gridHistory[gridHistory.length - 1];
     setGridHistory(h => h.slice(0, -1));
+    setRedoStack(r => [...r, grid]);
     setGrid(prev);
     setBitInput(gridToBits(prev));
-    showToast("Undone last bit flip", "info");
+    showToast("Undone last change", "info");
+  };
+
+  const redoRef = useRef(null);
+  redoRef.current = () => {
+    if (redoStack.length === 0) return;
+    const next = redoStack[redoStack.length - 1];
+    setRedoStack(r => r.slice(0, -1));
+    setGridHistory(h => [...h.slice(-9), grid]);
+    setGrid(next);
+    setBitInput(gridToBits(next));
+    showToast("Redone", "info");
   };
 
   // ── auto-recompute analysis whenever inputs change ──
@@ -378,18 +411,36 @@ export default function ParityGridDynamic() {
   useEffect(() => {
     function onKeyDown(e) {
       if (e.key === "Escape") {
+        setShowShortcuts(false);
         setSelectedCell(null);
         setSelectedParity(null);
         setMode("weights");
       }
+      // redo must be checked before undo
+      if ((e.ctrlKey || e.metaKey) && e.shiftKey && e.key === "z") {
+        e.preventDefault();
+        redoRef.current?.();
+        return;
+      }
       if ((e.ctrlKey || e.metaKey) && e.key === "z") {
         e.preventDefault();
         undoRef.current?.();
+        return;
+      }
+      if ((e.ctrlKey || e.metaKey) && e.key === "y") {
+        e.preventDefault();
+        redoRef.current?.();
+        return;
+      }
+      // "?" toggles shortcuts help (only when not typing in an input)
+      if (e.key === "?" && !e.ctrlKey && !e.metaKey) {
+        if (e.target.tagName === "TEXTAREA" || e.target.tagName === "INPUT") return;
+        setShowShortcuts(s => !s);
       }
     }
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, []); // safe: setters are stable; undoRef is a ref
+  }, []);
 
   // ── memos ──
   const parityIds = useMemo(() => Object.keys(relations).sort(), [relations]);
@@ -421,6 +472,18 @@ export default function ParityGridDynamic() {
     const stored = Number(grid[pr][pc]);
     return { covered, xor, stored, ok: xor === stored };
   }, [selectedParity, relations, grid]);
+
+  // ── diff cells memo ──
+  const diffCells = useMemo(() => {
+    const diffs = new Set();
+    const currentBits = gridToBits(grid);
+    for (let i = 0; i < 80; i++) {
+      if (currentBits[i] !== originalBits[i]) {
+        diffs.add(idOf(Math.floor(i / COLS), i % COLS));
+      }
+    }
+    return diffs;
+  }, [grid, originalBits]);
 
   // ── helpers ──
   function showToast(message, type = "info") {
@@ -469,7 +532,10 @@ export default function ParityGridDynamic() {
       const g = bitsToGrid80(bitInput);
       setGrid(g);
       setBitInput(gridToBits(g));
+      setOriginalBits(gridToBits(g));
       setInputErrors(e => ({ ...e, bits: null }));
+      setGridHistory([]);
+      setRedoStack([]);
       showToast("Bits loaded", "success");
     } catch (err) {
       setInputErrors(e => ({ ...e, bits: err.message }));
@@ -503,9 +569,13 @@ export default function ParityGridDynamic() {
   }
 
   function toggleCell(r, c) {
-    const next = grid.map(row => row.slice());
-    next[r][c]  = next[r][c] ? 0 : 1;
+    let next = grid.map(row => row.slice());
+    next[r][c] = next[r][c] ? 0 : 1;
+    // recompute parity and checksum bits after flipping
+    next = applyRelationXor(next, checksumRelations);
+    next = applyRelationXor(next, relations);
     setGridHistory(h => [...h.slice(-9), grid]);
+    setRedoStack([]);
     setGrid(next);
     setBitInput(gridToBits(next));
   }
@@ -527,10 +597,12 @@ export default function ParityGridDynamic() {
     setRelations(DEFAULT_NORMALIZED_RELATIONS);
     setChecksumRelations(DEFAULT_NORMALIZED_CHECKSUM);
     setGrid(g);
+    setOriginalBits(gridToBits(g));
     setThresholdParity(2); setThresholdData(2); setFalsePositive(0);
     setMode("weights"); setSelectedCell(null); setSelectedParity(null);
     setInputErrors({ bits: null, parity: null, checksum: null });
     setGridHistory([]);
+    setRedoStack([]);
     showToast("Reset to defaults", "info");
   }
 
@@ -552,13 +624,11 @@ export default function ParityGridDynamic() {
     if (mode === "reverse") {
       const isParityHit   = selectedCell && selectedParityRelations.includes(id);
       const isChecksumHit = selectedCell && selectedChecksumRelations.includes(id);
-      if (isSelectedCell)                return "#111827";
-      if (isParityHit && isChecksumHit)  return "#c084fc";
-      if (isParityHit)                   return "#fdba74";
-      if (isChecksumHit)                 return "#86efac";
+      if (isSelectedCell)                return darkMode ? "#e2e8f0" : "#111827";
+      if (isParityHit || isChecksumHit)  return "#fb923c";
     }
 
-    if (isSelectedCell) return "#111827";
+    if (isSelectedCell) return darkMode ? "#e2e8f0" : "#111827";
     if (analysis.probableErrorCells?.includes(id))      return "#fb7185";
     if ((analysis.cellWeights?.[id] || 0) >= 4)         return "#f97316";
     if ((analysis.cellWeights?.[id] || 0) >= 2)         return "#fdba74";
@@ -580,23 +650,25 @@ export default function ParityGridDynamic() {
   const totalParityCount = (analysis.parityCorrect?.length ?? 0) + (analysis.parityIncorrect?.length ?? 0);
   const hasErrors = (analysis.parityIncorrect?.length || 0) > 0 || (analysis.checksumErrors?.length || 0) > 0;
   const currentBits = gridToBits(grid);
+  const diffCount = diffCells.size;
 
   // ── render ──
   return (
-    <div style={{ minHeight: "100vh", background: "#f1f5f9" }}>
+    <div style={{ minHeight: "100vh", background: "var(--bg-page)" }}>
       {/* ── Header ── */}
       <div style={{
-        background: "#1e293b",
-        color: "#fff",
+        background: "var(--bg-header)",
+        color: "var(--text-on-header)",
         padding: "11px 20px",
         display: "flex",
         alignItems: "center",
         gap: 14,
-        boxShadow: "0 2px 10px rgba(0,0,0,.25)",
+        boxShadow: "var(--shadow-header)",
+        flexWrap: "wrap",
       }}>
         <div>
           <div style={{ fontWeight: 700, fontSize: 15, letterSpacing: "-0.01em" }}>
-            8×10 Origami Parity Visualizer
+            8x10 Origami Parity Visualizer
           </div>
           <div style={{ fontSize: 11, opacity: 0.5, marginTop: 1 }}>
             Weight-based error analysis
@@ -608,7 +680,7 @@ export default function ParityGridDynamic() {
         {/* current bitstring preview */}
         <code style={{
           fontSize: 10,
-          background: "rgba(255,255,255,.08)",
+          background: "var(--code-bg)",
           padding: "4px 10px",
           borderRadius: 5,
           letterSpacing: "0.08em",
@@ -616,23 +688,39 @@ export default function ParityGridDynamic() {
           overflow: "hidden",
           textOverflow: "ellipsis",
           whiteSpace: "nowrap",
-          color: "rgba(255,255,255,.85)",
+          color: "var(--text-on-header-dim)",
         }}>
           {currentBits}
         </code>
 
         <button className="btn btn-ghost btn-sm"
-          style={{ color: "#e2e8f0", borderColor: "rgba(255,255,255,.25)" }}
+          style={{ color: "var(--header-btn-text)", borderColor: "var(--header-btn-border)" }}
           onClick={copyBitstring}
         >
           Copy bits
         </button>
 
         <button className="btn btn-ghost btn-sm"
-          style={{ color: "#e2e8f0", borderColor: "rgba(255,255,255,.25)" }}
+          style={{ color: "var(--header-btn-text)", borderColor: "var(--header-btn-border)" }}
           onClick={exportAnalysis}
         >
           Export JSON
+        </button>
+
+        <button className="btn btn-ghost btn-sm"
+          style={{ color: "var(--header-btn-text)", borderColor: "var(--header-btn-border)" }}
+          onClick={() => setDarkMode(d => !d)}
+          title="Toggle dark/light mode"
+        >
+          {darkMode ? "Light" : "Dark"}
+        </button>
+
+        <button className="btn btn-ghost btn-sm"
+          style={{ color: "var(--header-btn-text)", borderColor: "var(--header-btn-border)" }}
+          onClick={() => setShowShortcuts(s => !s)}
+          title="Keyboard shortcuts (?)"
+        >
+          ?
         </button>
 
         {/* overall status badge */}
@@ -643,30 +731,32 @@ export default function ParityGridDynamic() {
           fontSize: 12,
           fontWeight: 700,
           whiteSpace: "nowrap",
+          color: "#fff",
         }}>
           {hasErrors
             ? `${(analysis.parityIncorrect?.length || 0) + (analysis.checksumErrors?.length || 0)} error(s)`
-            : "✓ All OK"}
+            : "All OK"}
         </div>
       </div>
 
       {/* ── Main layout ── */}
-      <div style={{
-        padding: 16,
-        display: "grid",
-        gap: 16,
-        gridTemplateColumns: "1fr 420px",
-        fontFamily: 'ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial',
-        alignItems: "start",
-      }}>
+      <div className="main-layout">
 
         {/* ── Left: grid area ── */}
         <div>
           <div className="section-card" style={{ marginBottom: 12 }}>
             {/* Grid header */}
-            <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 12 }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 12, flexWrap: "wrap" }}>
               <div style={{ fontWeight: 700, fontSize: 15 }}>Grid</div>
               <span className={`mode-badge mode-${mode}`}>{mode}</span>
+              {diffCount > 0 && (
+                <span style={{
+                  fontSize: 11, fontWeight: 600,
+                  color: "var(--diff-marker)",
+                }}>
+                  {diffCount} changed
+                </span>
+              )}
               <div style={{ flex: 1 }} />
               <button className="btn btn-secondary btn-sm" onClick={clearSelection}>
                 Clear <span style={{ opacity: 0.6 }}>Esc</span>
@@ -678,96 +768,123 @@ export default function ParityGridDynamic() {
                 className="btn btn-secondary btn-sm"
                 onClick={() => undoRef.current?.()}
                 disabled={gridHistory.length === 0}
-                title="Undo last bit flip (Ctrl/⌘ + Z)"
+                title="Undo last change (Ctrl/Cmd + Z)"
               >
-                Undo <span style={{ opacity: 0.6 }}>⌘Z</span>
+                Undo <span style={{ opacity: 0.6 }}>^Z</span>
+              </button>
+              <button
+                className="btn btn-secondary btn-sm"
+                onClick={() => redoRef.current?.()}
+                disabled={redoStack.length === 0}
+                title="Redo (Ctrl/Cmd + Shift + Z)"
+              >
+                Redo <span style={{ opacity: 0.6 }}>^Y</span>
               </button>
             </div>
 
-            {/* Column labels */}
-            <div style={{ display: "flex", paddingLeft: 26, marginBottom: 3, gap: 6 }}>
-              {Array.from({ length: COLS }).map((_, c) => (
-                <div key={c} style={{
-                  width: 44, textAlign: "center",
-                  fontSize: 10, color: "#94a3b8", fontWeight: 600,
-                }}>
-                  {c}
+            {/* Scrollable grid wrapper for narrow viewports */}
+            <div className="grid-scroll-wrapper" role="grid" aria-label="8 by 10 parity grid">
+              {/* Column labels */}
+              <div style={{ display: "flex", paddingLeft: 26, marginBottom: 3, gap: 6 }}>
+                {Array.from({ length: COLS }).map((_, c) => (
+                  <div key={c} style={{
+                    width: 44, textAlign: "center",
+                    fontSize: 10, color: "var(--text-muted)", fontWeight: 600,
+                  }}>
+                    {c}
+                  </div>
+                ))}
+              </div>
+
+              {/* Rows with row labels */}
+              {Array.from({ length: ROWS }).map((_, r) => (
+                <div key={r} role="row" style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 6 }}>
+                  {/* Row label */}
+                  <div style={{
+                    width: 20, textAlign: "right", flexShrink: 0,
+                    fontSize: 10, color: "var(--text-muted)", fontWeight: 600,
+                  }}>
+                    {r}
+                  </div>
+
+                  {Array.from({ length: COLS }).map((__, c) => {
+                    const id       = idOf(r, c);
+                    const isParity = parityIds.includes(id);
+                    const isSelected = selectedCell === id || selectedParity === id;
+                    const weight   = analysis.cellWeights?.[id] || 0;
+                    const isDiff   = diffCells.has(id);
+
+                    const cellColor = baseColorForCell(id, isParity);
+                    const selectedTextColor = darkMode ? "#111827" : "#fff";
+
+                    return (
+                      <button
+                        key={id}
+                        className="grid-cell"
+                        role="gridcell"
+                        aria-label={`Cell ${r},${c}: value ${grid[r][c]}, weight ${weight}${isParity ? ", parity cell" : ""}${isDiff ? ", changed" : ""}`}
+                        title={`(${r},${c})  bit=${grid[r][c]}  weight=${weight}${isDiff ? "  (changed)" : ""}`}
+                        onClick={() => {
+                          if (isParity) {
+                            setSelectedParity(id);
+                            setSelectedCell(null);
+                            setMode("parityCoverage");
+                          } else {
+                            setSelectedCell(id);
+                            setSelectedParity(null);
+                            setMode("reverse");
+                          }
+                        }}
+                        onDoubleClick={() => toggleCell(r, c)}
+                        style={{
+                          width: 44, height: 44,
+                          borderRadius: 8,
+                          border: isSelected
+                            ? `2px solid ${darkMode ? "#e2e8f0" : "#1e293b"}`
+                            : "1px solid var(--cell-border)",
+                          background: cellColor,
+                          color: isSelected ? selectedTextColor : "var(--cell-text)",
+                          fontWeight: 700, fontSize: 15,
+                          cursor: "pointer",
+                          position: "relative",
+                          padding: 0, flexShrink: 0,
+                          boxShadow:
+                            isSelected
+                              ? `0 0 0 3px ${darkMode ? "rgba(226,232,240,.25)" : "rgba(30,41,59,.25)"}`
+                              : mode === "parityCoverage" && coveredBySelectedParity.includes(id)
+                              ? "inset 0 0 0 3px rgba(0,0,0,.55)"
+                              : "0 1px 2px rgba(0,0,0,.07)",
+                        }}
+                      >
+                        {grid[r][c]}
+                        {/* Diff marker dot */}
+                        {isDiff && (
+                          <span style={{
+                            position: "absolute", top: 2, left: 2,
+                            width: 6, height: 6, borderRadius: "50%",
+                            background: "var(--diff-marker)",
+                          }} />
+                        )}
+                        {/* Weight badge */}
+                        {shouldShowWeight(id) && weight > 0 && (
+                          <span style={{
+                            position: "absolute", bottom: 2, right: 3,
+                            fontSize: 9, fontWeight: 700, lineHeight: 1,
+                            color: isSelected ? selectedTextColor : "var(--cell-weight)",
+                            background:
+                              mode === "parityCoverage" && coveredBySelectedParity.includes(id)
+                                ? "rgba(255,255,255,.75)" : "transparent",
+                            borderRadius: 3, padding: "0 1px",
+                          }}>
+                            {weight}
+                          </span>
+                        )}
+                      </button>
+                    );
+                  })}
                 </div>
               ))}
             </div>
-
-            {/* Rows with row labels */}
-            {Array.from({ length: ROWS }).map((_, r) => (
-              <div key={r} style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 6 }}>
-                {/* Row label */}
-                <div style={{
-                  width: 20, textAlign: "right", flexShrink: 0,
-                  fontSize: 10, color: "#94a3b8", fontWeight: 600,
-                }}>
-                  {r}
-                </div>
-
-                {Array.from({ length: COLS }).map((__, c) => {
-                  const id       = idOf(r, c);
-                  const isParity = parityIds.includes(id);
-                  const isSelected = selectedCell === id || selectedParity === id;
-                  const weight   = analysis.cellWeights?.[id] || 0;
-
-                  return (
-                    <button
-                      key={id}
-                      className="grid-cell"
-                      title={`(${r},${c})  bit=${grid[r][c]}  weight=${weight}`}
-                      onClick={() => {
-                        if (isParity) {
-                          setSelectedParity(id);
-                          setSelectedCell(null);
-                          setMode("parityCoverage");
-                        } else {
-                          setSelectedCell(id);
-                          setSelectedParity(null);
-                          setMode("reverse");
-                        }
-                      }}
-                      onDoubleClick={() => toggleCell(r, c)}
-                      style={{
-                        width: 44, height: 44,
-                        borderRadius: 8,
-                        border: isSelected ? "2px solid #1e293b" : "1px solid rgba(0,0,0,.12)",
-                        background: baseColorForCell(id, isParity),
-                        color: isSelected ? "#fff" : "rgba(0,0,0,.75)",
-                        fontWeight: 700, fontSize: 15,
-                        cursor: "pointer",
-                        outline: "none",
-                        position: "relative",
-                        padding: 0, flexShrink: 0,
-                        boxShadow:
-                          isSelected
-                            ? "0 0 0 3px rgba(30,41,59,.25)"
-                            : mode === "parityCoverage" && coveredBySelectedParity.includes(id)
-                            ? "inset 0 0 0 3px rgba(0,0,0,.55)"
-                            : "0 1px 2px rgba(0,0,0,.07)",
-                      }}
-                    >
-                      {grid[r][c]}
-                      {shouldShowWeight(id) && weight > 0 && (
-                        <span style={{
-                          position: "absolute", bottom: 2, right: 3,
-                          fontSize: 9, fontWeight: 700, lineHeight: 1,
-                          color: isSelected ? "#fff" : "rgba(0,0,0,.55)",
-                          background:
-                            mode === "parityCoverage" && coveredBySelectedParity.includes(id)
-                              ? "rgba(255,255,255,.75)" : "transparent",
-                          borderRadius: 3, padding: "0 1px",
-                        }}>
-                          {weight}
-                        </span>
-                      )}
-                    </button>
-                  );
-                })}
-              </div>
-            ))}
           </div>
 
           {/* Action buttons */}
@@ -778,8 +895,8 @@ export default function ParityGridDynamic() {
             </button>
           </div>
 
-          <div style={{ fontSize: 11, color: "#94a3b8", marginBottom: 12 }}>
-            Click parity cell → coverage view · Click data cell → reverse lookup · Double-click → flip bit · Esc → clear · ⌘Z → undo
+          <div style={{ fontSize: 11, color: "var(--text-muted)", marginBottom: 12 }}>
+            Click parity cell = coverage · Click data cell = reverse lookup · Double-click = flip bit · Esc = clear · ^Z/^Y = undo/redo · ? = shortcuts
           </div>
 
           {/* Color legend */}
@@ -793,11 +910,11 @@ export default function ParityGridDynamic() {
                 ["#ef4444", "Index"],
                 ["#d946ef", "Orientation"],
                 ["#22c55e", "Data"],
-                ["#fdba74", "Med. weight / parity-hit"],
-                ["#86efac", "Checksum-hit"],
-                ["#c084fc", "Parity + checksum hit"],
-                ["#f97316", "High weight (≥4)"],
+                ["#fdba74", "Med. weight (>=2)"],
+                ["#fb923c", "Relation hit (reverse)"],
+                ["#f97316", "High weight (>=4)"],
                 ["#fb7185", "Probable error"],
+                ["var(--diff-marker)", "Changed from original"],
               ].map(([color, label]) => (
                 <div key={label} className="legend-item">
                   <div className="legend-dot" style={{ background: color }} />
@@ -813,205 +930,264 @@ export default function ParityGridDynamic() {
 
           {/* Analysis summary */}
           <div className="section-card">
-            <div className="section-title">Analysis</div>
-            <div className="stat-row">
-              <span>Normalized weight</span>
-              <span className="stat-value">{Number(analysis.normalizedWeight || 0).toFixed(3)}</span>
+            <div
+              className={`section-title section-title-collapsible ${collapsed.analysis ? "section-title-collapsed" : ""}`}
+              onClick={() => toggleCollapse("analysis")}
+            >
+              Analysis
+              <span className={`chevron ${collapsed.analysis ? "chevron-collapsed" : ""}`}>&#9660;</span>
             </div>
-            <div className="stat-row">
-              <span>Raw matrix weight</span>
-              <span className="stat-value">{analysis.rawMatrixWeight ?? 0}</span>
-            </div>
-            <div className="stat-row">
-              <span>Correct parity</span>
-              <span className={`stat-value ${analysis.parityIncorrect?.length === 0 ? "stat-ok" : "stat-warn"}`}>
-                {analysis.parityCorrect?.length ?? 0} / {totalParityCount}
-              </span>
-            </div>
-            <div className="stat-row">
-              <span>Parity errors</span>
-              <span className={`stat-value ${(analysis.parityIncorrect?.length || 0) > 0 ? "stat-error" : "stat-ok"}`}>
-                {analysis.parityIncorrect?.length ?? 0}
-              </span>
-            </div>
-            <div className="stat-row">
-              <span>Checksum errors</span>
-              <span className={`stat-value ${(analysis.checksumErrors?.length || 0) > 0 ? "stat-error" : "stat-ok"}`}>
-                {analysis.checksumErrors?.length ?? 0}
-              </span>
-            </div>
-            <div className="stat-row">
-              <span>Probable data errors</span>
-              <span className={`stat-value ${(analysis.probableDataErrors?.length || 0) > 0 ? "stat-warn" : "stat-ok"}`}>
-                {analysis.probableDataErrors?.length ?? 0}
-              </span>
-            </div>
-            <div className="stat-row">
-              <span>Probable parity errors</span>
-              <span className={`stat-value ${(analysis.probableParityError?.length || 0) > 0 ? "stat-warn" : "stat-ok"}`}>
-                {analysis.probableParityError?.length ?? 0}
-              </span>
-            </div>
-            <div className="stat-row">
-              <span>Total probable error cells</span>
-              <span className={`stat-value ${(analysis.probableErrorCells?.length || 0) > 0 ? "stat-error" : "stat-ok"}`}>
-                {analysis.probableErrorCells?.length ?? 0}
-              </span>
-            </div>
+            {!collapsed.analysis && (
+              <>
+                <div className="stat-row">
+                  <span>Normalized weight</span>
+                  <span className="stat-value">{Number(analysis.normalizedWeight || 0).toFixed(3)}</span>
+                </div>
+                <div className="stat-row">
+                  <span>Raw matrix weight</span>
+                  <span className="stat-value">{analysis.rawMatrixWeight ?? 0}</span>
+                </div>
+                <div className="stat-row">
+                  <span>Correct parity</span>
+                  <span className={`stat-value ${analysis.parityIncorrect?.length === 0 ? "stat-ok" : "stat-warn"}`}>
+                    {analysis.parityCorrect?.length ?? 0} / {totalParityCount}
+                  </span>
+                </div>
+                <div className="stat-row">
+                  <span>Parity errors</span>
+                  <span className={`stat-value ${(analysis.parityIncorrect?.length || 0) > 0 ? "stat-error" : "stat-ok"}`}>
+                    {analysis.parityIncorrect?.length ?? 0}
+                  </span>
+                </div>
+                <div className="stat-row">
+                  <span>Checksum errors</span>
+                  <span className={`stat-value ${(analysis.checksumErrors?.length || 0) > 0 ? "stat-error" : "stat-ok"}`}>
+                    {analysis.checksumErrors?.length ?? 0}
+                  </span>
+                </div>
+                <div className="stat-row">
+                  <span>Probable data errors</span>
+                  <span className={`stat-value ${(analysis.probableDataErrors?.length || 0) > 0 ? "stat-warn" : "stat-ok"}`}>
+                    {analysis.probableDataErrors?.length ?? 0}
+                  </span>
+                </div>
+                <div className="stat-row">
+                  <span>Probable parity errors</span>
+                  <span className={`stat-value ${(analysis.probableParityError?.length || 0) > 0 ? "stat-warn" : "stat-ok"}`}>
+                    {analysis.probableParityError?.length ?? 0}
+                  </span>
+                </div>
+                <div className="stat-row">
+                  <span>Total probable error cells</span>
+                  <span className={`stat-value ${(analysis.probableErrorCells?.length || 0) > 0 ? "stat-error" : "stat-ok"}`}>
+                    {analysis.probableErrorCells?.length ?? 0}
+                  </span>
+                </div>
+              </>
+            )}
           </div>
 
           {/* Inspector */}
           <div className="section-card">
-            <div className="section-title">Inspector</div>
+            <div
+              className={`section-title section-title-collapsible ${collapsed.inspector ? "section-title-collapsed" : ""}`}
+              onClick={() => toggleCollapse("inspector")}
+            >
+              Inspector
+              <span className={`chevron ${collapsed.inspector ? "chevron-collapsed" : ""}`}>&#9660;</span>
+            </div>
 
-            {mode === "parityCoverage" && selectedParity ? (
-              <>
-                <div className="stat-row">
-                  <span>Selected parity</span>
-                  <code style={{ fontSize: 12, fontFamily: "monospace" }}>{selectedParity}</code>
-                </div>
-                <div className="stat-row">
-                  <span>XOR(covered)</span>
-                  <span className="stat-value">{relationInfo?.xor ?? "—"}</span>
-                </div>
-                <div className="stat-row">
-                  <span>Stored parity bit</span>
-                  <span className="stat-value">{relationInfo?.stored ?? "—"}</span>
-                </div>
-                <div className="stat-row">
-                  <span>Status</span>
-                  <span className={`stat-value ${relationInfo?.ok ? "stat-ok" : "stat-error"}`}>
-                    {relationInfo?.ok ? "✓ OK" : "✗ Mismatch"}
-                  </span>
-                </div>
-                <div style={{ marginTop: 8, fontSize: 12, color: "#64748b" }}>
-                  Covered cells: <b>{coveredBySelectedParity.length}</b>
-                </div>
-                <div style={{ maxHeight: 170, overflow: "auto", marginTop: 6 }}>
-                  {coveredBySelectedParity.map(cid => {
-                    const [r, c] = parseId(cid);
-                    const w = analysis.cellWeights?.[cid] || 0;
-                    return (
-                      <div key={cid} className="covered-row">
-                        <span>{cid}</span>
-                        <span style={{ color: "#94a3b8" }}>bit={grid[r][c]} · w={w}</span>
-                      </div>
-                    );
-                  })}
-                </div>
-              </>
-            ) : (
-              <>
-                <div className="stat-row">
-                  <span>Selected cell</span>
-                  <code style={{ fontSize: 12, fontFamily: "monospace" }}>{selectedCell || "—"}</code>
-                </div>
-                <div className="stat-row">
-                  <span>Weight</span>
-                  <span className={`stat-value ${selectedWeight >= 4 ? "stat-error" : selectedWeight >= 2 ? "stat-warn" : ""}`}>
-                    {selectedWeight}
-                  </span>
-                </div>
-                <div style={{ marginTop: 8, fontSize: 12, color: "#64748b" }}>
-                  Parity relations: <b>{selectedParityRelations.length}</b>
-                </div>
-                <ul style={{ maxHeight: 80, overflow: "auto", margin: "4px 0 8px", fontFamily: "monospace", fontSize: 11, paddingLeft: 18 }}>
-                  {selectedParityRelations.map(pid => <li key={pid}>{pid}</li>)}
-                </ul>
-                <div style={{ fontSize: 12, color: "#64748b" }}>
-                  Checksum relations: <b>{selectedChecksumRelations.length}</b>
-                </div>
-                <ul style={{ maxHeight: 80, overflow: "auto", margin: "4px 0 0", fontFamily: "monospace", fontSize: 11, paddingLeft: 18 }}>
-                  {selectedChecksumRelations.map(cid => <li key={cid}>{cid}</li>)}
-                </ul>
-              </>
+            {!collapsed.inspector && (
+              mode === "parityCoverage" && selectedParity ? (
+                <>
+                  <div className="stat-row">
+                    <span>Selected parity</span>
+                    <code style={{ fontSize: 12, fontFamily: "monospace" }}>{selectedParity}</code>
+                  </div>
+                  <div className="stat-row">
+                    <span>XOR(covered)</span>
+                    <span className="stat-value">{relationInfo?.xor ?? "—"}</span>
+                  </div>
+                  <div className="stat-row">
+                    <span>Stored parity bit</span>
+                    <span className="stat-value">{relationInfo?.stored ?? "—"}</span>
+                  </div>
+                  <div className="stat-row">
+                    <span>Status</span>
+                    <span className={`stat-value ${relationInfo?.ok ? "stat-ok" : "stat-error"}`}>
+                      {relationInfo?.ok ? "OK" : "Mismatch"}
+                    </span>
+                  </div>
+                  <div style={{ marginTop: 8, fontSize: 12, color: "var(--text-secondary)" }}>
+                    Covered cells: <b>{coveredBySelectedParity.length}</b>
+                  </div>
+                  <div style={{ maxHeight: 170, overflow: "auto", marginTop: 6 }}>
+                    {coveredBySelectedParity.map(cid => {
+                      const [r, c] = parseId(cid);
+                      const w = analysis.cellWeights?.[cid] || 0;
+                      return (
+                        <div key={cid} className="covered-row">
+                          <span>{cid}</span>
+                          <span style={{ color: "var(--text-muted)" }}>bit={grid[r][c]} · w={w}</span>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </>
+              ) : (
+                <>
+                  <div className="stat-row">
+                    <span>Selected cell</span>
+                    <code style={{ fontSize: 12, fontFamily: "monospace" }}>{selectedCell || "—"}</code>
+                  </div>
+                  <div className="stat-row">
+                    <span>Weight</span>
+                    <span className={`stat-value ${selectedWeight >= 4 ? "stat-error" : selectedWeight >= 2 ? "stat-warn" : ""}`}>
+                      {selectedWeight}
+                    </span>
+                  </div>
+                  <div style={{ marginTop: 8, fontSize: 12, color: "var(--text-secondary)" }}>
+                    Parity relations: <b>{selectedParityRelations.length}</b>
+                  </div>
+                  <ul style={{ maxHeight: 80, overflow: "auto", margin: "4px 0 8px", fontFamily: "monospace", fontSize: 11, paddingLeft: 18, color: "var(--text-primary)" }}>
+                    {selectedParityRelations.map(pid => <li key={pid}>{pid}</li>)}
+                  </ul>
+                  <div style={{ fontSize: 12, color: "var(--text-secondary)" }}>
+                    Checksum relations: <b>{selectedChecksumRelations.length}</b>
+                  </div>
+                  <ul style={{ maxHeight: 80, overflow: "auto", margin: "4px 0 0", fontFamily: "monospace", fontSize: 11, paddingLeft: 18, color: "var(--text-primary)" }}>
+                    {selectedChecksumRelations.map(cid => <li key={cid}>{cid}</li>)}
+                  </ul>
+                </>
+              )
             )}
           </div>
 
           {/* Thresholds — auto-recompute */}
           <div className="section-card">
-            <div className="section-title">
-              Thresholds
-              <span style={{ fontWeight: 400, textTransform: "none", fontSize: 10, color: "#bbc4d0", marginLeft: 6 }}>
-                auto-recompute
+            <div
+              className={`section-title section-title-collapsible ${collapsed.thresholds ? "section-title-collapsed" : ""}`}
+              onClick={() => toggleCollapse("thresholds")}
+            >
+              <span>
+                Thresholds
+                <span style={{ fontWeight: 400, textTransform: "none", fontSize: 10, color: "var(--text-muted)", marginLeft: 6 }}>
+                  auto-recompute
+                </span>
               </span>
+              <span className={`chevron ${collapsed.thresholds ? "chevron-collapsed" : ""}`}>&#9660;</span>
             </div>
-            <div style={{ display: "grid", gap: 8 }}>
-              <label style={{ display: "flex", justifyContent: "space-between", alignItems: "center", fontSize: 13 }}>
-                <span>Parity threshold</span>
-                <input type="number" value={thresholdParity}
-                  onChange={e => setThresholdParity(Number(e.target.value))} />
-              </label>
-              <label style={{ display: "flex", justifyContent: "space-between", alignItems: "center", fontSize: 13 }}>
-                <span>Data threshold</span>
-                <input type="number" value={thresholdData}
-                  onChange={e => setThresholdData(Number(e.target.value))} />
-              </label>
-              <label style={{ display: "flex", justifyContent: "space-between", alignItems: "center", fontSize: 13 }}>
-                <span>False positive budget</span>
-                <input type="number" value={falsePositive}
-                  onChange={e => setFalsePositive(Number(e.target.value))} />
-              </label>
-            </div>
+            {!collapsed.thresholds && (
+              <div style={{ display: "grid", gap: 8 }}>
+                <label style={{ display: "flex", justifyContent: "space-between", alignItems: "center", fontSize: 13 }}>
+                  <span>Parity threshold</span>
+                  <input type="number" value={thresholdParity}
+                    onChange={e => setThresholdParity(Number(e.target.value))} />
+                </label>
+                <label style={{ display: "flex", justifyContent: "space-between", alignItems: "center", fontSize: 13 }}>
+                  <span>Data threshold</span>
+                  <input type="number" value={thresholdData}
+                    onChange={e => setThresholdData(Number(e.target.value))} />
+                </label>
+                <label style={{ display: "flex", justifyContent: "space-between", alignItems: "center", fontSize: 13 }}>
+                  <span>False positive budget</span>
+                  <input type="number" value={falsePositive}
+                    onChange={e => setFalsePositive(Number(e.target.value))} />
+                </label>
+              </div>
+            )}
           </div>
 
           {/* Load Inputs */}
           <div className="section-card">
-            <div className="section-title">Load Inputs</div>
-
-            {/* Bitstring */}
-            <div style={{ marginBottom: 12 }}>
-              <label style={{ fontSize: 12, color: "#64748b", display: "block", marginBottom: 4 }}>
-                80-bit string
-              </label>
-              <textarea
-                rows={2}
-                value={bitInput}
-                className={inputErrors.bits ? "has-error" : ""}
-                onChange={e => setBitInput(e.target.value.trim())}
-              />
-              {inputErrors.bits && <div className="error-msg">{inputErrors.bits}</div>}
-              <button className="btn btn-primary btn-sm" style={{ marginTop: 6 }} onClick={loadBits}>
-                Load bits
-              </button>
+            <div
+              className={`section-title section-title-collapsible ${collapsed.loadInputs ? "section-title-collapsed" : ""}`}
+              onClick={() => toggleCollapse("loadInputs")}
+            >
+              Load Inputs
+              <span className={`chevron ${collapsed.loadInputs ? "chevron-collapsed" : ""}`}>&#9660;</span>
             </div>
 
-            {/* Parity relations */}
-            <div style={{ marginBottom: 12 }}>
-              <label style={{ fontSize: 12, color: "#64748b", display: "block", marginBottom: 4 }}>
-                Parity relations <span style={{ opacity: 0.6 }}>(JSON or Python dict)</span>
-              </label>
-              <textarea
-                rows={6}
-                value={relInput}
-                className={inputErrors.parity ? "has-error" : ""}
-                onChange={e => setRelInput(e.target.value)}
-              />
-              {inputErrors.parity && <div className="error-msg">{inputErrors.parity}</div>}
-              <button className="btn btn-primary btn-sm" style={{ marginTop: 6 }} onClick={loadRelations}>
-                Load parity relations
-              </button>
-            </div>
+            {!collapsed.loadInputs && (
+              <>
+                {/* Bitstring */}
+                <div style={{ marginBottom: 12 }}>
+                  <label style={{ fontSize: 12, color: "var(--text-secondary)", display: "block", marginBottom: 4 }}>
+                    80-bit string
+                  </label>
+                  <textarea
+                    rows={2}
+                    value={bitInput}
+                    className={inputErrors.bits ? "has-error" : ""}
+                    onChange={e => setBitInput(e.target.value.trim())}
+                  />
+                  {inputErrors.bits && <div className="error-msg">{inputErrors.bits}</div>}
+                  <button className="btn btn-primary btn-sm" style={{ marginTop: 6 }} onClick={loadBits}>
+                    Load bits
+                  </button>
+                </div>
 
-            {/* Checksum relations */}
-            <div>
-              <label style={{ fontSize: 12, color: "#64748b", display: "block", marginBottom: 4 }}>
-                Checksum relations <span style={{ opacity: 0.6 }}>(JSON or Python dict)</span>
-              </label>
-              <textarea
-                rows={6}
-                value={checksumInput}
-                className={inputErrors.checksum ? "has-error" : ""}
-                onChange={e => setChecksumInput(e.target.value)}
-              />
-              {inputErrors.checksum && <div className="error-msg">{inputErrors.checksum}</div>}
-              <button className="btn btn-primary btn-sm" style={{ marginTop: 6 }} onClick={loadChecksumRelations}>
-                Load checksum relations
-              </button>
-            </div>
+                {/* Parity relations */}
+                <div style={{ marginBottom: 12 }}>
+                  <label style={{ fontSize: 12, color: "var(--text-secondary)", display: "block", marginBottom: 4 }}>
+                    Parity relations <span style={{ opacity: 0.6 }}>(JSON or Python dict)</span>
+                  </label>
+                  <textarea
+                    rows={6}
+                    value={relInput}
+                    className={inputErrors.parity ? "has-error" : ""}
+                    onChange={e => setRelInput(e.target.value)}
+                  />
+                  {inputErrors.parity && <div className="error-msg">{inputErrors.parity}</div>}
+                  <button className="btn btn-primary btn-sm" style={{ marginTop: 6 }} onClick={loadRelations}>
+                    Load parity relations
+                  </button>
+                </div>
+
+                {/* Checksum relations */}
+                <div>
+                  <label style={{ fontSize: 12, color: "var(--text-secondary)", display: "block", marginBottom: 4 }}>
+                    Checksum relations <span style={{ opacity: 0.6 }}>(JSON or Python dict)</span>
+                  </label>
+                  <textarea
+                    rows={6}
+                    value={checksumInput}
+                    className={inputErrors.checksum ? "has-error" : ""}
+                    onChange={e => setChecksumInput(e.target.value)}
+                  />
+                  {inputErrors.checksum && <div className="error-msg">{inputErrors.checksum}</div>}
+                  <button className="btn btn-primary btn-sm" style={{ marginTop: 6 }} onClick={loadChecksumRelations}>
+                    Load checksum relations
+                  </button>
+                </div>
+              </>
+            )}
           </div>
         </div>
       </div>
+
+      {/* ── Keyboard shortcuts modal ── */}
+      {showShortcuts && (
+        <div className="shortcuts-overlay" onClick={() => setShowShortcuts(false)}>
+          <div className="section-card" style={{ maxWidth: 420, width: "90%" }}
+               onClick={e => e.stopPropagation()}>
+            <div className="section-title">Keyboard Shortcuts</div>
+            <div style={{ display: "grid", gridTemplateColumns: "auto 1fr", gap: "8px 16px", fontSize: 13, alignItems: "center" }}>
+              <kbd>?</kbd><span>Toggle this help</span>
+              <kbd>Esc</kbd><span>Clear selection / close modal</span>
+              <kbd>Ctrl+Z</kbd><span>Undo</span>
+              <kbd>Ctrl+Shift+Z</kbd><span>Redo</span>
+              <kbd>Ctrl+Y</kbd><span>Redo (alt)</span>
+            </div>
+            <div style={{ marginTop: 14, fontSize: 12, color: "var(--text-secondary)" }}>
+              <b>Mouse:</b> Click parity cell = coverage view · Click data cell = reverse lookup · Double-click = flip bit
+            </div>
+            <div style={{ marginTop: 10, textAlign: "right" }}>
+              <button className="btn btn-secondary btn-sm" onClick={() => setShowShortcuts(false)}>Close</button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* ── Toast notifications ── */}
       <div className="toast-container">
