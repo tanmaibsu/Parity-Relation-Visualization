@@ -184,12 +184,109 @@ function getMatrixWeightAdvanced({
   const probableDataErrorByWeight = {};
 
   for (const pos of Object.keys(countedProbable)) {
+    const weight = countedProbable[pos];
+    cellWeights[pos] = weight;
+
+    if (!probableDataErrorByWeight[weight]) probableDataErrorByWeight[weight] = [];
+    probableDataErrorByWeight[weight].push(pos);
+  }
+
+  const dataBitToParityBit = buildReverseMap(parityRelations);
+  const allProbableParity  = [];
+  for (const pos of Object.keys(cellWeights)) {
+    const linked = dataBitToParityBit[pos] || [];
+    allProbableParity.push(...linked);
+  }
+  allProbableParity.push(...parityIncorrect);
+
+  const countedParityErrors = counter(allProbableParity);
+
+  let matrixWeight = 0;
+  const probableParityError = [];
+  const probableDataErrors  = [];
+
+  let falsePositiveData   = 0;
+  let falsePositiveParity = 0;
+  const fpDataLimit   = Math.floor((falsePositive + 1) / 2);
+  const fpParityLimit = Math.floor(falsePositive / 2);
+
+  for (const pid of Object.keys(countedParityErrors)) {
+    const weight = countedParityErrors[pid];
+    matrixWeight += weight;
+    const [r, c] = parseId(pid);
+    const currentValue =
+      !Number.isNaN(r) && !Number.isNaN(c) && r >= 0 && r < ROWS && c >= 0 && c < COLS
+        ? Number(grid[r][c]) : 0;
+    if (weight >= thresholdParity) {
+      if (currentValue === 0) {
+        probableParityError.push(pid);
+      } else if (falsePositiveParity < fpParityLimit) {
+        probableParityError.push(pid);
+        falsePositiveParity += 1;
+      }
+      cellWeights[pid] = Math.max(cellWeights[pid] || 0, weight);
+    }
+  }
+
+  const sortedDataWeights = Object.keys(probableDataErrorByWeight).map(Number).sort((a, b) => b - a);
+  for (const weight of sortedDataWeights) {
+    const cells = probableDataErrorByWeight[weight];
+    if (weight >= thresholdData) {
+      for (const pos of cells) {
+        const [r, c] = parseId(pos);
+        const currentValue =
+          !Number.isNaN(r) && !Number.isNaN(c) && r >= 0 && r < ROWS && c >= 0 && c < COLS
+            ? Number(grid[r][c]) : 0;
+        if (currentValue === 0) {
+          probableDataErrors.push(pos);
+        } else if (falsePositiveData < fpDataLimit) {
+          probableDataErrors.push(pos);
+          falsePositiveData += 1;
+        }
+      }
+    }
+    matrixWeight += weight * cells.length;
+  }
+
+  const probableErrorCells = [...new Set([...probableDataErrors, ...probableParityError])];
+  const normalizedWeight   =
+    parityCorrect.length > 0 ? matrixWeight / parityCorrect.length : matrixWeight;
+
+  return {
+    parityCorrect, parityIncorrect,
+    checksumErrors, checksumRelatedErrors,
+    cellWeights, probableErrorCells,
+    probableParityError, probableDataErrors,
+    normalizedWeight, rawMatrixWeight: matrixWeight, falsePositive,
+  };
+}
+
+function getMatrixWeightAdvanced2({
+  grid, parityRelations, checksumRelations,
+  thresholdParity = 2, thresholdData = 2, falsePositive = 0,
+}) {
+  const parityStatus    = findParityStatus(grid, parityRelations);
+  const parityIncorrect = parityStatus.incorrect;
+  const parityCorrect   = parityStatus.correct;
+
+  const probableErrorIndexes = [];
+  for (const pid of parityIncorrect)
+    probableErrorIndexes.push(...Array.from(parityRelations[pid] || []));
+
+  const { checksumErrors, checksumRelatedErrors } = findChecksumStatus(grid, checksumRelations);
+  for (const cid of checksumErrors) probableErrorIndexes.push(cid);
+
+  const countedProbable = counter(probableErrorIndexes);
+  const cellWeights = {};
+  const probableDataErrorByWeight = {};
+
+  for (const pos of Object.keys(countedProbable)) {
     const count = countedProbable[pos];
     const isInChecksumRelated = checksumRelatedErrors.includes(pos);
     const isInChecksumErrors  = checksumErrors.includes(pos);
 
     let extra = 0;
-    if (isInChecksumRelated && isInChecksumErrors) extra = 2;
+    if (isInChecksumRelated && isInChecksumErrors) extra = 1;
     else if (isInChecksumRelated || isInChecksumErrors) extra = 1;
 
     const weight = count + extra;
@@ -341,7 +438,7 @@ export default function ParityGridDynamic() {
   const [selectedParity,setSelectedParity]= useState(null);
 
   const [analysis, setAnalysis] = useState(() =>
-    getMatrixWeightAdvanced({
+    getMatrixWeightAdvanced2({
       grid: buildDefaultGrid(),
       parityRelations: DEFAULT_NORMALIZED_RELATIONS,
       checksumRelations: DEFAULT_NORMALIZED_CHECKSUM,
@@ -401,7 +498,7 @@ export default function ParityGridDynamic() {
 
   // ── auto-recompute analysis whenever inputs change ──
   useEffect(() => {
-    setAnalysis(getMatrixWeightAdvanced({
+    setAnalysis(getMatrixWeightAdvanced2({
       grid, parityRelations: relations, checksumRelations,
       thresholdParity, thresholdData, falsePositive,
     }));
@@ -572,8 +669,8 @@ export default function ParityGridDynamic() {
     let next = grid.map(row => row.slice());
     next[r][c] = next[r][c] ? 0 : 1;
     // recompute parity and checksum bits after flipping
-    next = applyRelationXor(next, checksumRelations);
-    next = applyRelationXor(next, relations);
+    //next = applyRelationXor(next, checksumRelations);
+    //next = applyRelationXor(next, relations);
     setGridHistory(h => [...h.slice(-9), grid]);
     setRedoStack([]);
     setGrid(next);
