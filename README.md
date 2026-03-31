@@ -39,9 +39,12 @@ The grid switches between three modes automatically based on what you click:
 |---|---|
 | **Single-click** a parity cell | Switch to parity-coverage mode; show that parity cell's covered bits and XOR status in the Inspector |
 | **Single-click** a data cell | Switch to reverse mode; show which parity/checksum relations cover it |
-| **Double-click** any cell | Flip that bit (0↔1); pushes state onto undo stack |
+| **Double-click** any cell | Flip that bit (0↔1) — works on **all** cell types (parity, checksum, index, orientation, data). Does **not** auto-recompute parity/checksum; use the Recompute button when ready |
+| **Click empty space** in the grid area | Deselect the current cell and return to weights mode |
 | **Esc** | Clear selection, return to weights mode |
 | **Ctrl/⌘ + Z** | Undo last bit flip (up to 10 levels) |
+| **Ctrl/⌘ + Shift + Z** or **Ctrl/⌘ + Y** | Redo |
+| **?** | Toggle keyboard shortcuts help overlay |
 
 ## Loading data
 
@@ -79,6 +82,7 @@ Same format as parity relations. Paste into the **Checksum relations** text area
 | **Export JSON** | Download a timestamped JSON file with the current bitstring, thresholds, and full analysis |
 | **Reset** | Restore all inputs, relations, and thresholds to built-in defaults |
 | **Undo ⌘Z** | Revert the last bit flip |
+| **Redo ⌘Y** | Re-apply the last undone bit flip |
 
 ## Analysis
 
@@ -125,6 +129,18 @@ Shows details for the currently selected cell:
 | Violet | Parity + checksum hit (reverse mode) |
 | Deep orange | High weight (≥ 4) |
 | Rose/pink | Probable error cell |
+
+## Dark mode
+
+Click the sun/moon toggle in the top-right corner to switch between light and dark themes. The preference is saved in `localStorage` and persists across sessions.
+
+## Diff highlighting
+
+After loading a bitstring, any cell whose value has changed from the original is marked with a small dot indicator, making it easy to track which bits you have flipped.
+
+## Collapsible sidebar sections
+
+The sidebar panels (Analysis, Inspector, Thresholds, Load inputs) can each be collapsed/expanded by clicking their header, keeping the interface compact.
 
 ## Input format notes
 
