@@ -4,4 +4,4 @@ node_modules/
 CLAUDE.local.md
 .claude/settings.local.json
 .vercel
-src/CLAUDE.md
+CLAUDE.md
