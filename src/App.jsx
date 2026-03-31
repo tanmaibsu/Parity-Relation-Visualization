@@ -13,6 +13,8 @@ const INDEX       = new Set(["7,8", "7,9"]);
 const ORIENTATION = new Set(["1,0", "1,9", "6,0", "6,9"]);
 
 // ---------------- helpers ----------------
+
+// Convert an 80-character "0"/"1" bitstring into an 8×10 2D grid array (row-major order).
 function bitsToGrid80(bitstr) {
   if (!/^[01]{80}$/.test(bitstr)) {
     throw new Error("Bitstring must be exactly 80 characters of 0/1.");
@@ -26,6 +28,7 @@ function bitsToGrid80(bitstr) {
   return grid;
 }
 
+// Convert an 8×10 2D grid array back into an 80-character bitstring.
 function gridToBits(grid) {
   let out = "";
   for (let r = 0; r < ROWS; r++)
@@ -34,10 +37,13 @@ function gridToBits(grid) {
   return out;
 }
 
+// XOR-reduce an array of numeric values (0/1) into a single bit.
 function xorValues(values) {
   return values.reduce((acc, v) => acc ^ Number(v), 0);
 }
 
+// Normalize a raw relation map (various key formats) into { "r,c": Set(["r,c", ...]) }.
+// Strips brackets, parens, and whitespace from keys; converts array-of-pair values to "r,c" strings.
 function normalizeRelation(obj) {
   const out = {};
   for (const rawKey of Object.keys(obj || {})) {
@@ -56,6 +62,8 @@ function normalizeRelation(obj) {
   return out;
 }
 
+// Parse user-supplied relation text that may be JSON or Python-style dict syntax.
+// Attempts JSON.parse first, then falls back to converting Python tuples/single-quotes to valid JSON.
 function parseRelationsFlexible(text) {
   try { return JSON.parse(text); } catch (_) {}
   let t = text.trim();
@@ -68,6 +76,8 @@ function parseRelationsFlexible(text) {
   return JSON.parse(t);
 }
 
+// For each relation key (output cell), compute XOR of its input cells and write the result
+// into the output cell. Returns a new grid (does not mutate the original).
 function applyRelationXor(grid, relations) {
   const next = grid.map((row) => row.slice());
   for (const outId of Object.keys(relations || {})) {
@@ -86,6 +96,8 @@ function applyRelationXor(grid, relations) {
   return next;
 }
 
+// Invert the parity relation map: for each data cell, list which parity cells cover it.
+// Returns { dataCellId: [parityCellId, ...] }.
 function buildReverseMap(parityRelations) {
   const reverse = {};
   for (const parityId of Object.keys(parityRelations || {})) {
@@ -97,6 +109,8 @@ function buildReverseMap(parityRelations) {
   return reverse;
 }
 
+// Check each parity cell: compare its stored value against the XOR of its input cells.
+// Returns { correct: [...ids], incorrect: [...ids] }.
 function findParityStatus(grid, parityRelations) {
   const correct = [], incorrect = [];
   for (const parityId of Object.keys(parityRelations || {})) {
@@ -117,6 +131,8 @@ function findParityStatus(grid, parityRelations) {
   return { correct, incorrect };
 }
 
+// Check each checksum cell: compare its stored value against the XOR of its input cells.
+// Returns { checksumErrors: [...ids], checksumRelatedErrors: [...inputIds] } for failing checksums.
 function findChecksumStatus(grid, checksumRelations) {
   const checksumErrors = [], checksumRelatedErrors = [];
   for (const checksumId of Object.keys(checksumRelations || {})) {
@@ -140,12 +156,14 @@ function findChecksumStatus(grid, checksumRelations) {
   return { checksumErrors, checksumRelatedErrors };
 }
 
+// Count occurrences of each element in an array. Returns { element: count }.
 function counter(arr) {
   const m = {};
   for (const x of arr) m[x] = (m[x] || 0) + 1;
   return m;
 }
 
+// Find all checksum cells whose input set includes the given cell.
 function findChecksumRelationsForCell(cellId, checksumRelations) {
   const hits = [];
   for (const checksumId of Object.keys(checksumRelations || {})) {
@@ -155,6 +173,7 @@ function findChecksumRelationsForCell(cellId, checksumRelations) {
   return hits;
 }
 
+// Find all parity cells whose input set includes the given cell.
 function findParityRelationsForCell(cellId, parityRelations) {
   const hits = [];
   for (const parityId of Object.keys(parityRelations || {})) {
@@ -164,6 +183,9 @@ function findParityRelationsForCell(cellId, parityRelations) {
   return hits;
 }
 
+// Compute the full weight-based error analysis. Aggregates parity and checksum status,
+// counts how many failing relations each cell appears in, applies thresholds and false-positive
+// limits, and returns probable error cells with per-cell weights and a normalized matrix weight.
 function getMatrixWeightAdvanced({
   grid, parityRelations, checksumRelations,
   thresholdParity = 2, thresholdData = 2, falsePositive = 0,
@@ -411,6 +433,7 @@ const DEFAULT_CHECKSUM_INPUT = JSON.stringify(DEFAULT_CHECKSUM_RELATIONS, null, 
 const DEFAULT_NORMALIZED_RELATIONS = normalizeRelation(DEFAULT_RELATIONS);
 const DEFAULT_NORMALIZED_CHECKSUM  = normalizeRelation(DEFAULT_CHECKSUM_RELATIONS);
 
+// Build the initial grid from the default bitstring and recompute parity + checksum cells.
 function buildDefaultGrid() {
   let g = bitsToGrid80(DEFAULT_BITSTRING);
   g = applyRelationXor(g, DEFAULT_NORMALIZED_CHECKSUM);
@@ -583,12 +606,15 @@ export default function ParityGridDynamic() {
   }, [grid, originalBits]);
 
   // ── helpers ──
+
+  // Display a temporary toast notification that auto-dismisses after 3 seconds.
   function showToast(message, type = "info") {
     const id = ++toastIdRef.current;
     setToasts(t => [...t, { id, message, type }]);
     setTimeout(() => setToasts(t => t.filter(x => x.id !== id)), 3000);
   }
 
+  // Copy the current grid's bitstring to the system clipboard.
   function copyBitstring() {
     const bits = gridToBits(grid);
     navigator.clipboard.writeText(bits)
@@ -596,6 +622,7 @@ export default function ParityGridDynamic() {
       .catch(() => showToast("Copy failed — check browser permissions", "error"));
   }
 
+  // Export the current bitstring, thresholds, and full analysis results as a downloadable JSON file.
   function exportAnalysis() {
     const data = {
       timestamp: new Date().toISOString(),
@@ -624,6 +651,8 @@ export default function ParityGridDynamic() {
   }
 
   // ── load / action functions ──
+
+  // Parse the bitstring input field and replace the grid. Resets undo history and diff baseline.
   function loadBits() {
     try {
       const g = bitsToGrid80(bitInput);
@@ -639,6 +668,7 @@ export default function ParityGridDynamic() {
     }
   }
 
+  // Parse the parity relations textarea and replace the active parity relation map.
   function loadRelations() {
     try {
       const obj        = parseRelationsFlexible(relInput);
@@ -652,6 +682,7 @@ export default function ParityGridDynamic() {
     }
   }
 
+  // Parse the checksum relations textarea and replace the active checksum relation map.
   function loadChecksumRelations() {
     try {
       const obj        = parseRelationsFlexible(checksumInput);
@@ -665,18 +696,17 @@ export default function ParityGridDynamic() {
     }
   }
 
+  // Flip a single cell's bit (0↔1) without recomputing parity/checksum. Pushes to undo history.
   function toggleCell(r, c) {
-    let next = grid.map(row => row.slice());
+    const next = grid.map(row => row.slice());
     next[r][c] = next[r][c] ? 0 : 1;
-    // recompute parity and checksum bits after flipping
-    //next = applyRelationXor(next, checksumRelations);
-    //next = applyRelationXor(next, relations);
     setGridHistory(h => [...h.slice(-9), grid]);
     setRedoStack([]);
     setGrid(next);
     setBitInput(gridToBits(next));
   }
 
+  // Recompute all parity and checksum cells by XOR-ing their respective input cells.
   function recomputeParityAndChecksum() {
     let updated = grid.map(row => row.slice());
     updated = applyRelationXor(updated, checksumRelations);
@@ -686,6 +716,7 @@ export default function ParityGridDynamic() {
     showToast("Parity & checksum recomputed", "success");
   }
 
+  // Reset everything (grid, relations, thresholds, selection, history) back to built-in defaults.
   function resetAll() {
     const g = buildDefaultGrid();
     setBitInput(DEFAULT_BITSTRING);
@@ -703,11 +734,15 @@ export default function ParityGridDynamic() {
     showToast("Reset to defaults", "info");
   }
 
+  // Deselect any selected cell/parity and return to the default "weights" view mode.
   function clearSelection() {
     setSelectedCell(null); setSelectedParity(null); setMode("weights");
   }
 
   // ── cell coloring ──
+
+  // Determine the background color for a cell based on current mode, selection state,
+  // error weights, and cell role (parity / checksum / index / orientation / data).
   function baseColorForCell(id, isParity) {
     const isSelectedCell   = selectedCell   === id;
     const isSelectedParity = selectedParity === id;
@@ -736,6 +771,7 @@ export default function ParityGridDynamic() {
     return "#22c55e";
   }
 
+  // Whether to display the weight badge on a cell (always in weights mode; only relevant cells in parityCoverage mode).
   function shouldShowWeight(id) {
     if (mode === "parityCoverage")
       return id === selectedParity || coveredBySelectedParity.includes(id);
@@ -880,7 +916,12 @@ export default function ParityGridDynamic() {
             </div>
 
             {/* Scrollable grid wrapper for narrow viewports */}
-            <div className="grid-scroll-wrapper" role="grid" aria-label="8 by 10 parity grid">
+            <div className="grid-scroll-wrapper" role="grid" aria-label="8 by 10 parity grid"
+              onClick={(e) => {
+                if (!e.target.closest('.grid-cell')) {
+                  setSelectedCell(null); setSelectedParity(null); setMode("weights");
+                }
+              }}>
               {/* Column labels */}
               <div style={{ display: "flex", paddingLeft: 26, marginBottom: 3, gap: 6 }}>
                 {Array.from({ length: COLS }).map((_, c) => (
