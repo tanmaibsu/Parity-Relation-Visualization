@@ -460,13 +460,13 @@ export default function ParityGridDynamic() {
   const [selectedCell,  setSelectedCell]  = useState(null);
   const [selectedParity,setSelectedParity]= useState(null);
 
-  const [analysis, setAnalysis] = useState(() =>
+  // Synchronously derive analysis from current grid + relations + thresholds (no render lag).
+  const analysis = useMemo(() =>
     getMatrixWeightAdvanced2({
-      grid: buildDefaultGrid(),
-      parityRelations: DEFAULT_NORMALIZED_RELATIONS,
-      checksumRelations: DEFAULT_NORMALIZED_CHECKSUM,
-      thresholdParity: 2, thresholdData: 2, falsePositive: 0,
-    })
+      grid, parityRelations: relations, checksumRelations,
+      thresholdParity, thresholdData, falsePositive,
+    }),
+    [grid, relations, checksumRelations, thresholdParity, thresholdData, falsePositive]
   );
 
   // ── undo / redo ──
@@ -519,13 +519,6 @@ export default function ParityGridDynamic() {
     showToast("Redone", "info");
   };
 
-  // ── auto-recompute analysis whenever inputs change ──
-  useEffect(() => {
-    setAnalysis(getMatrixWeightAdvanced2({
-      grid, parityRelations: relations, checksumRelations,
-      thresholdParity, thresholdData, falsePositive,
-    }));
-  }, [grid, relations, checksumRelations, thresholdParity, thresholdData, falsePositive]);
 
   // ── keyboard shortcuts ──
   useEffect(() => {
@@ -700,6 +693,7 @@ export default function ParityGridDynamic() {
   function toggleCell(r, c) {
     const next = grid.map(row => row.slice());
     next[r][c] = next[r][c] ? 0 : 1;
+    console.log(`[toggleCell] (${r},${c}): ${grid[r][c]} -> ${next[r][c]}, bits: ${gridToBits(next)}`);
     setGridHistory(h => [...h.slice(-9), grid]);
     setRedoStack([]);
     setGrid(next);
@@ -784,6 +778,20 @@ export default function ParityGridDynamic() {
   const hasErrors = (analysis.parityIncorrect?.length || 0) > 0 || (analysis.checksumErrors?.length || 0) > 0;
   const currentBits = gridToBits(grid);
   const diffCount = diffCells.size;
+
+  // Compute flip-priority ranking from cell weights (1 = highest weight = best to flip).
+  const flipPriority = useMemo(() => {
+    const weights = analysis.cellWeights || {};
+    const entries = Object.entries(weights).filter(([, w]) => w > 0);
+    entries.sort((a, b) => b[1] - a[1]);
+    const result = {};
+    let rank = 1;
+    for (let i = 0; i < entries.length; i++) {
+      if (i > 0 && entries[i][1] < entries[i - 1][1]) rank += 1;
+      result[entries[i][0]] = rank;
+    }
+    return result;
+  }, [analysis.cellWeights]);
 
   // ── render ──
   return (
@@ -1003,7 +1011,17 @@ export default function ParityGridDynamic() {
                             background: "var(--diff-marker)",
                           }} />
                         )}
-                        {/* Weight badge */}
+                        {/* Flip-priority badge (upper-right) */}
+                        {shouldShowWeight(id) && weight > 0 && flipPriority[id] && (
+                          <span style={{
+                            position: "absolute", top: 1, right: 2,
+                            fontSize: 8, fontWeight: 700, lineHeight: 1,
+                            color: isSelected ? selectedTextColor : "var(--cell-weight)",
+                          }}>
+                            {flipPriority[id]}
+                          </span>
+                        )}
+                        {/* Weight badge (bottom-right) */}
                         {shouldShowWeight(id) && weight > 0 && (
                           <span style={{
                             position: "absolute", bottom: 2, right: 3,
